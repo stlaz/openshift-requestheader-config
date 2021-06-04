@@ -1,0 +1,166 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apache-deployment
+  labels:
+    app: apache-login-proxy
+spec:
+  selector:
+    matchLabels:
+      app: apache-login-proxy
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: apache-login-proxy
+    spec:
+      containers:
+      - name: apache
+        image: docker.io/httpd:2.4
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        volumeMounts:
+        - name: htpasswd-secret
+          mountPath: /auth
+        - name: certs
+          mountPath: /pki
+        - name: config
+          mountPath: /usr/local/apache2/conf
+        securityContext:
+          privileged: true # this is me being lazy, you probably don't want to do this 
+        env:
+        - name: OAUTH_ROUTE
+          valueFrom:
+            configMapKeyRef:
+              name: routes
+              key: oauth_route
+        - name: PROXY_ROUTE
+          valueFrom:
+            configMapKeyRef:
+              name: routes
+              key: proxy_route
+      volumes:
+       - name: htpasswd-secret
+         secret:
+           secretName: htpasswd-secret
+       - name: certs
+         secret:
+           secretName: crypto
+       - name: config
+         configMap:
+           name: apache-config
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: apache-svc
+  labels:
+    app: apache-login-proxy
+spec:
+  ports:
+    - name: login
+      port: 8443
+  selector:
+    app: apache-login-proxy
+
+---
+
+apiVersion: v1
+kind: Route
+metadata:
+  labels:
+    app: apache-login-proxy
+  name: login
+spec:
+  port:
+    targetPort: login
+  to:
+    kind: Service
+    name: apache-svc
+  tls:
+    termination: passthrough
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app: apache-login-proxy
+  name: htpasswd-secret
+data:
+  htpasswd: ZnJhbnRhOiQyeSQwNSRRa0UyOEtQNnMzSDNhWU8uT1NvU1ouOHM5VTF3Q0o4ODhzSW1rYWRPMmUuTWEuYnltbnlnRwpwZXBhOiQyeSQwNSRoZ3BxVmxYUW1SVGtuUUpzamYuVE5lRkgzclpuMzBSbUdSUWNXRWxJQkFOVTl0RkRyNVlxeQpqb3NlZjokMnkkMDUkeG5DL3VBTUdSRHRNckkuUXFCUUgvdVVBNUpEWktqQUl5b2NDOEZrRmgvaHJSMklGanpmVUsK # franta:dobryden pepa:zdravim josef:rankolide
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: apache-login-proxy
+  name: apache-config
+data:
+  httpd.conf: |-
+    LoadModule mpm_event_module modules/mod_mpm_event.so
+    LoadModule request_module modules/mod_request.so
+    LoadModule authn_core_module modules/mod_authn_core.so
+    LoadModule authn_file_module modules/mod_authn_file.so
+    LoadModule authz_core_module modules/mod_authz_core.so
+    LoadModule authz_user_module modules/mod_authz_user.so
+    LoadModule auth_basic_module modules/mod_auth_basic.so
+    LoadModule proxy_module modules/mod_proxy.so
+    LoadModule proxy_http_module modules/mod_proxy_http.so
+    LoadModule headers_module modules/mod_headers.so
+    LoadModule ssl_module modules/mod_ssl.so
+    LoadModule socache_shmcb_module modules/mod_socache_shmcb.so
+    LoadModule log_config_module modules/mod_log_config.so
+    LoadModule rewrite_module modules/mod_rewrite.so
+    LoadModule unixd_module modules/mod_unixd.so
+
+    User daemon
+    Group daemon
+
+    LogLevel trace5
+    Listen 8443
+    ServerName ${PROXY_ROUTE}
+
+    <VirtualHost *:8443>
+      CustomLog "logs/ssl_request_log" "%t U=%{SSL_CLIENT_SAN_OTHER_msUPN_0}x %h \"%r\" %b"
+     
+      SSLEngine on
+      SSLCertificateFile /pki/server.crt
+      SSLCertificateKeyFile /pki/server.key
+      SSLCACertificateFile /pki/ca.crt
+    
+      SSLProxyEngine on
+      SSLProxyCACertificateFile /pki/ca.crt
+      SSLProxyMachineCertificateFile /pki/client.pem
+      SSLProxyVerify none
+
+      RewriteEngine on
+      RewriteRule ^/challenges/oauth/authorize(.*) https://${OAUTH_ROUTE}/oauth/authorize$1 [P,L]
+      RewriteRule ^/web-login/oauth/authorize(.*) https://${OAUTH_ROUTE}/oauth/authorize$1 [P,L]
+
+      <Location /challenges/oauth/authorize>
+        AuthType Basic
+        AuthName "OpenShift"
+        AuthUserFile "/auth/htpasswd"
+        Require valid-user
+        RequestHeader set "X-Remote-User" %{REMOTE_USER}s
+      </Location>
+
+      <Location /web-login/oauth/authorize>
+        AuthType Basic
+        AuthName "OpenShift"
+        AuthUserFile "/auth/htpasswd"
+        Require valid-user
+        RequestHeader set "X-Remote-User" %{REMOTE_USER}s
+
+        ErrorDocument 401 '<html><body>Client certificate authentication failed</body></html>'
+      </Location>
+
+    </VirtualHost>
+
